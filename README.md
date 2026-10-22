@@ -119,3 +119,7 @@ VITE_BASE_PATH=/my-subpath/ npm run build
 - First-time visitors get a short onboarding tour. It can be replayed with **How it works** in the header.
 - Onboarding completion is stored in `localStorage` under `capacity-lab:onboarding-v1`.
 - Reduced-motion preferences and keyboard navigation are supported.
+
+## License
+
+MIT © 2026 Sachin Jain. See [LICENSE](LICENSE).
