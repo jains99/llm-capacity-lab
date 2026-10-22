@@ -85,7 +85,7 @@ describe("memory model", () => {
       gpuId: "l40s",
       gpuCount: 2,
       context: 4096,
-      users: 100,
+      users: 80,
     });
     expect(m.mode).toBe("replicas");
     expect(m.weightsInstalledGB).toBeCloseTo(m.weightsGB * 2, 1);
@@ -103,6 +103,7 @@ describe("memory model", () => {
       gpuId: "l40s",
       gpuCount: 2,
       context: 4096,
+      users: 80,
     });
     expect(m.mode).toBe("replicas");
     expect(m.maxUsers).toBeGreaterThan(80);
@@ -112,6 +113,39 @@ describe("memory model", () => {
     const m = computeMetrics({ ...noCache, gpuCount: 4 });
     expect(m.mode).toBe("tensor-parallel");
     expect(m.weightsPerGpuGB).toBeCloseTo(17.65, 1);
+  });
+
+  it("does not switch a 70B INT4 deployment to overcommitted replicas", () => {
+    const m = computeMetrics({ ...BASE_CONFIG, quantId: "int4" });
+    expect(m.mode).toBe("tensor-parallel");
+    expect(m.fits).toBe(true);
+    expect(m.usedGB).toBeLessThanOrEqual(m.capacityGB);
+    expect(m.maxUsers).toBeGreaterThan(BASE_CONFIG.users);
+  });
+
+  it("makes INT4 better than FP8 for the same 4xH100 deployment", () => {
+    const fp8 = computeMetrics(BASE_CONFIG);
+    const int4 = computeMetrics({ ...BASE_CONFIG, quantId: "int4" });
+    expect(int4.maxUsers).toBeGreaterThan(fp8.maxUsers);
+    expect(int4.tpotMs).toBeLessThan(fp8.tpotMs);
+    expect(int4.ttftP95Ms).toBeLessThan(fp8.ttftP95Ms + 1);
+  });
+
+  it("uses sharding when replicas cannot carry the requested users", () => {
+    const base = {
+      ...noCache,
+      modelId: "llama8b",
+      quantId: "bf16" as const,
+      gpuId: "l40s",
+      gpuCount: 2,
+      context: 4096,
+    };
+    const replicaLoad = computeMetrics({ ...base, users: 80 });
+    const shardedLoad = computeMetrics({ ...base, users: 300 });
+    expect(replicaLoad.mode).toBe("replicas");
+    expect(replicaLoad.maxUsers).toBeGreaterThanOrEqual(80);
+    expect(shardedLoad.mode).toBe("tensor-parallel");
+    expect(shardedLoad.maxUsers).toBeGreaterThan(replicaLoad.maxUsers);
   });
 });
 
@@ -194,7 +228,7 @@ describe("topology", () => {
       gpuId: "l40s",
       gpuCount: 1,
       context: 2048,
-      users: 200,
+      users: 250,
     });
     expect(advice.mode).toBe("replicas");
     expect(advice.recommended).toBeGreaterThan(1);

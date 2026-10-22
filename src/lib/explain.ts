@@ -166,7 +166,7 @@ export const EXPLAINERS: Record<string, Explainer> = {
     body: [
       "A replica is a complete copy of the model on its own GPU. Requests are routed to whichever replica has room.",
       "No all-reduce, no cross-GPU synchronization, linear capacity, and a failure only takes out one replica. The catch: every replica duplicates the weights, so it only works when the model fits with room for KV.",
-      "This simulator picks replicas when weights leave at least 15% of VRAM free, and shards otherwise.",
+      "This simulator picks replicas when weights leave at least 15% of VRAM free and the requested load fits; otherwise it shards, because replicas duplicate the weights and do not split a single request's prefill.",
     ],
   },
   interconnect: {

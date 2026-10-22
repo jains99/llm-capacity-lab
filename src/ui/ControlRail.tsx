@@ -116,13 +116,19 @@ export function ControlRail({ m }: { m: Metrics }) {
             onChange={(v) => set("gpuCount", v)}
             format={(v) => `${v} × ${gpu.short}`}
           />
-          {m.mode === "replicas" ? (
+          {m.mode === "single" ? (
             <div className="field-hint">
-              Weights fit with room to spare, so each GPU holds a full copy. No all-reduce.
+              One GPU holds the weights and KV cache. No interconnect traffic.
+            </div>
+          ) : m.mode === "replicas" ? (
+            <div className="field-hint">
+              Each GPU holds a full copy of the weights and serves its own requests.
+              No all-reduce, but the weights are duplicated.
             </div>
           ) : (
             <div className="field-hint">
-              Weights are split across GPUs. Every layer pays an all-reduce over {gpu.linkName}.
+              Weights and KV are split across GPUs. Every layer pays an all-reduce
+              over {gpu.linkName}; sharding is used when replicas cannot hold the load.
             </div>
           )}
         </div>

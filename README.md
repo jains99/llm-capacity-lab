@@ -46,8 +46,17 @@ NO_OPEN=1 ./start.sh
 npm run build       # type-check and produce dist/
 npm run preview     # serve the production build locally
 npm test            # formula and catalogue regression tests
+npm run test:matrix # exhaustive inference matrix + HTML report
+npm run test:all    # run both test suites
 npm run lint
 ```
+
+`npm run test:matrix` executes every case sequentially and writes:
+
+- `reports/inference-matrix.html` — searchable, filterable report with one row per case.
+- `reports/inference-matrix.log` — full pass/fail log.
+
+The matrix covers every model × weight precision × GPU × GPU count, plus context-length, user-load, KV-precision, cache, preset, and topology regression suites. `reports/` is intentionally git-ignored; the report is generated locally.
 
 The app is a static bundle. `dist/` can be uploaded to any static web server.
 

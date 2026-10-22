@@ -155,13 +155,40 @@ export function computeMetrics(c: EngineConfig): Metrics {
   const capacityGB = usablePerGpu * n;
 
   const modelFitsSingle = weightsGB + c.overheadPerGpuGB <= usablePerGpu;
-  // Replicas avoid every all-reduce, but duplicate the weights. Only prefer them
-  // when they still leave meaningful room for KV cache.
+  // Replicas avoid every all-reduce, but duplicate the weights. Prefer them only
+  // when they leave meaningful KV headroom *and* can carry the requested load.
+  // Otherwise shard the weights, which keeps one copy of them in total.
   const replicaFreeFrac =
     (usablePerGpu - weightsGB - c.overheadPerGpuGB) / usablePerGpu;
-  const preferReplicas = modelFitsSingle && replicaFreeFrac >= 0.15;
+  const sharedKVGB = kvPerUserGB * sharedSaving;
+  const privateKVGB = kvPerUserGB * (1 - sharedSaving);
+  const maxUsersFor = (layout: "replicas" | "tensor-parallel") => {
+    if (layout === "replicas") {
+      if (!modelFitsSingle) return 0;
+      const perReplicaAvail = usablePerGpu - weightsGB - c.overheadPerGpuGB;
+      const perReplica =
+        privateKVGB > 0
+          ? Math.floor((perReplicaAvail - sharedKVGB) / privateKVGB)
+          : Infinity;
+      return Math.max(0, perReplica) * n;
+    }
+    const avail = capacityGB - weightsGB - overheadGB;
+    const raw =
+      privateKVGB > 0 ? (avail - sharedKVGB) / privateKVGB : Infinity;
+    return Math.max(0, Math.floor(raw));
+  };
+  const replicaMaxUsers = maxUsersFor("replicas");
+  const tpMaxUsers = maxUsersFor("tensor-parallel");
+  const canReplicate = modelFitsSingle && replicaFreeFrac >= 0.15;
+  // If replicas can serve the requested users, take the no-all-reduce route.
+  // If they cannot, sharding usually buys the capacity the replicas duplicated
+  // away. The capacity comparison is the fallback when neither layout fits.
   const mode: Metrics["mode"] =
-    n === 1 ? "single" : preferReplicas ? "replicas" : "tensor-parallel";
+    n === 1
+      ? "single"
+      : canReplicate && (replicaMaxUsers >= users || replicaMaxUsers >= tpMaxUsers)
+        ? "replicas"
+        : "tensor-parallel";
   const weightsPerGpuGB = mode === "tensor-parallel" ? weightsGB / n : weightsGB;
   const weightsInstalledGB = mode === "replicas" ? weightsGB * n : weightsGB;
 
@@ -176,22 +203,8 @@ export function computeMetrics(c: EngineConfig): Metrics {
   const freeGB = capacityGB - usedGB;
   const fits = freeGB >= 0 && weightsPerGpuGB + c.overheadPerGpuGB <= usablePerGpu;
 
-  let maxUsers = 0;
-  const sharedKVGB = kvPerUserGB * sharedSaving;
-  const privateKVGB = kvPerUserGB * (1 - sharedSaving);
-  if (mode !== "tensor-parallel") {
-    const perReplicaAvail = usablePerGpu - weightsGB - c.overheadPerGpuGB;
-    const perReplica =
-      privateKVGB > 0
-        ? Math.floor((perReplicaAvail - sharedKVGB) / privateKVGB)
-        : Infinity;
-    maxUsers = mode === "replicas" ? Math.max(0, perReplica) * n : Math.max(0, perReplica);
-  } else {
-    const avail = capacityGB - weightsGB - overheadGB;
-    const raw =
-      privateKVGB > 0 ? (avail - sharedKVGB) / privateKVGB : Infinity;
-    maxUsers = Math.max(0, Math.floor(raw));
-  }
+  let maxUsers =
+    mode === "tensor-parallel" ? tpMaxUsers : maxUsersFor("replicas");
   maxUsers = Number.isFinite(maxUsers) ? Math.min(maxUsers, 100_000) : 100_000;
 
   const eff = mode === "tensor-parallel" ? scalingEfficiency(n, gpu.linkGBs) : 1;
@@ -468,7 +481,7 @@ export function adviseTopology(c: EngineConfig): TopologyAdvice {
     reasons.push({
       label: capacityUnreachable
         ? "Capacity beyond 64 GPUs"
-        : canReplicate
+        : final.mode === "replicas"
           ? "KV capacity"
           : "KV + weights capacity",
       detail: `Serving ${c.users.toLocaleString()} users at ${(base.context / 1024).toFixed(0)}k context needs about ${minCapacity} GPU${minCapacity > 1 ? "s" : ""} of memory.`,
@@ -498,19 +511,19 @@ export function adviseTopology(c: EngineConfig): TopologyAdvice {
   }
   if (decodeUnreachable) {
     warnings.push(
-      canReplicate
+      final.mode === "replicas"
         ? `Replicas cannot reduce per-token latency: even ${MAX_GPUS} copies miss the ${c.targetTpot} ms TPOT target. Meeting it needs tensor parallelism, which pays an all-reduce.`
         : `Even ${MAX_GPUS}-way sharding misses the ${c.targetTpot} ms TPOT target. The interconnect or the model size is the wall.`,
     );
   }
   if (prefillUnreachable) {
     warnings.push(
-      canReplicate
+      final.mode === "replicas"
         ? `Replicas do not split a single request's prefill: even ${MAX_GPUS} copies miss the ${c.targetTtft} ms TTFT target. Tensor parallelism, a shorter prompt, or a faster node is the fix.`
         : `Even ${MAX_GPUS} GPUs miss the ${c.targetTtft} ms TTFT target. Shorten the prompt, raise MFU, or use a faster node.`,
     );
   }
-  if (!canReplicate && recommended > 1 && gpu.linkGBs < 100) {
+  if (final.mode === "tensor-parallel" && recommended > 1 && gpu.linkGBs < 100) {
     warnings.push(
       `Tensor parallelism over ${gpu.linkName} (${gpu.linkGBs} GB/s) pays an all-reduce on every layer, every token. Prefer a node with NVLink, or pipeline parallelism.`,
     );
@@ -520,7 +533,7 @@ export function adviseTopology(c: EngineConfig): TopologyAdvice {
       "Past 8-way tensor parallelism you are crossing nodes. Expect pipeline parallelism or a multi-node fabric, and a real scaling penalty.",
     );
   }
-  if (!canReplicate && base.model.kvHeads < recommended && recommended <= 8) {
+  if (final.mode === "tensor-parallel" && base.model.kvHeads < recommended && recommended <= 8) {
     warnings.push(
       `This model has only ${base.model.kvHeads} KV heads, which limits clean tensor-parallel splits to ${base.model.kvHeads}.`,
     );
@@ -530,7 +543,7 @@ export function adviseTopology(c: EngineConfig): TopologyAdvice {
       `A single ${(base.context / 1024).toFixed(0)}k-token request needs ${base.kvPerUserGB.toFixed(1)} GB of KV — more than one ${gpu.short} can hold. Context itself forces sharding.`,
     );
   }
-  if (canReplicate && recommended > 1 && !decodeUnreachable) {
+  if (final.mode === "replicas" && recommended > 1 && !decodeUnreachable) {
     warnings.push(
       prefillUnreachable
         ? "Replicas are the right shape for capacity and throughput, but they cannot fix the TTFT target. Tensor parallelism would only help latency."
