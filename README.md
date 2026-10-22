@@ -1,5 +1,7 @@
 # Capacity Lab
 
+**Live demo:** <https://jains99.github.io/llm-capacity-lab/>
+
 An interactive, single-page simulator for LLM inference capacity. It shows how model weights, KV cache, context length, concurrency, memory bandwidth, prefill compute, and cache hit rates decide whether a workload fits on one GPU or needs several.
 
 Everything runs in the browser. There is no API, database, or server-side component, so the built site can be hosted on any static host.
