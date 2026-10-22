@@ -1071,6 +1071,7 @@ function buildHtml(results: TestResult[], startedAt: string, durationMs: number)
   <div class="wrap">
     <h1>Capacity Lab — inference matrix report</h1>
     <p class="subtitle">Every row is one deterministic case executed sequentially: models × weight precision × GPU × GPU count, plus context, user-load, KV-precision, cache, preset, and regression suites.</p>
+    <p class="note">PASS means the case satisfied its invariants. A case can pass while reporting “does not fit” — that is a valid capacity outcome, not a test failure. Regression rows additionally assert exact expected modes and capacities.</p>
     <div class="cards">
       <div class="card"><div class="label">Cases</div><div class="value">${total.toLocaleString()}</div></div>
       <div class="card"><div class="label">Passed</div><div class="value pass">${passed.toLocaleString()}</div></div>
