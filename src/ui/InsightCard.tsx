@@ -1,8 +1,17 @@
 import { fmtGB, fmtMoney, fmtMs, fmtNum, fmtPct } from "../lib/format";
 import type { EngineConfig, Metrics, TopologyAdvice } from "../lib/formulas";
+import { recommendUsers } from "../lib/formulas";
 import type { Lens } from "../state/store";
 
 type Row = { label: string; value: string; dot?: string };
+
+const BIND_WORD: Record<string, string> = {
+  memory: "KV memory",
+  ttft: "the TTFT target",
+  tpot: "decode bandwidth",
+  queue: "queueing headroom",
+  load: "the simulator's load cap",
+};
 
 export function InsightCard({
   m,
@@ -17,6 +26,7 @@ export function InsightCard({
 }) {
   if (lens === "overview") return null;
 
+  const rec = recommendUsers(config);
   let title = "";
   let rows: Row[] = [];
   let note = "";
@@ -99,6 +109,15 @@ export function InsightCard({
           advice.maxUsersAt,
         )} KV slots · p95 TTFT ${fmtMs(advice.ttftAt)}.`;
     warning = advice.warnings[0] ?? "";
+  }
+
+  if (lens !== "topology" && config.users > rec.recommended) {
+    warning =
+      rec.recommended === 0
+        ? `The current selection cannot serve this load at all — the first gate is ${BIND_WORD[rec.bind]}.`
+        : `${fmtNum(config.users)} users is ${fmtNum(
+            config.users - rec.recommended,
+          )} over the recommended load; the first gate to break is ${BIND_WORD[rec.bind]}.`;
   }
 
   return (

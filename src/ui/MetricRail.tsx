@@ -1,5 +1,6 @@
 import { fmtCompact, fmtGB, fmtMoney, fmtMs, fmtNum, fmtPct } from "../lib/format";
 import type { Metrics, TopologyAdvice } from "../lib/formulas";
+import { recommendUsers } from "../lib/formulas";
 import { useStore } from "../state/store";
 import { Info } from "./controls";
 
@@ -10,6 +11,14 @@ const BOTTLENECK_LABEL: Record<string, { text: string; tone: string }> = {
   "weights-bandwidth": { text: "Weights BW", tone: "cyan" },
   "prefill-compute": { text: "Prefill FLOPs", tone: "amber" },
   balanced: { text: "Balanced", tone: "" },
+};
+
+const BIND_LABEL: Record<string, { text: string; tone: string }> = {
+  memory: { text: "memory-bound", tone: "amber" },
+  ttft: { text: "TTFT-bound", tone: "amber" },
+  tpot: { text: "TPOT-bound", tone: "amber" },
+  queue: { text: "queue-bound", tone: "red" },
+  load: { text: "simulator cap", tone: "" },
 };
 
 export function MetricRail({ m, advice }: { m: Metrics; advice: TopologyAdvice }) {
@@ -35,6 +44,8 @@ export function MetricRail({ m, advice }: { m: Metrics; advice: TopologyAdvice }
   const kvActiveGB = (m.kvPerTokenMB / 1000) * m.context * m.batch;
   const weightsReadGB = m.mode === "tensor-parallel" ? m.weightsPerGpuGB : m.weightsGB;
   const readPerGpuGB = weightsReadGB + kvActiveGB / m.n;
+  const rec = recommendUsers(config);
+  const recBind = BIND_LABEL[rec.bind] ?? BIND_LABEL.memory;
   const targetGap =
     advice.maxUsersAt < config.users
       ? "capacity"
@@ -65,6 +76,34 @@ export function MetricRail({ m, advice }: { m: Metrics; advice: TopologyAdvice }
           <br />
           {fmtNum(config.users)} users · {fmtGB(m.kvPerUserGB)} at{" "}
           {fmtNum(m.context / 1024, 0)}k context
+        </div>
+      </div>
+
+      <div className="metric">
+        <div className="metric-label">
+          Recommended users
+          <Info topic="users" />
+        </div>
+        <div
+          className="metric-value sm"
+          style={{ color: rec.recommended === 0 ? "#ff5f5f" : undefined }}
+        >
+          {fmtNum(rec.recommended)}
+          <span className="unit">max</span>
+        </div>
+        <div className="metric-sub">
+          <span className={`tag ${recBind.tone}`}>{recBind.text}</span>
+          <br />
+          {rec.note}
+          {config.users > rec.recommended && rec.recommended > 0 ? (
+            <>
+              <br />
+              <span className="warn">
+                Serving {fmtNum(config.users)} is {fmtNum(config.users - rec.recommended)} over
+                this line.
+              </span>
+            </>
+          ) : null}
         </div>
       </div>
 

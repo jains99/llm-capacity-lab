@@ -1,5 +1,12 @@
 import { describe, expect, it } from "vitest";
-import { adviseTopology, computeMetrics, erlangC, scalingEfficiency } from "../src/lib/formulas";
+import {
+  adviseTopology,
+  computeMetrics,
+  erlangC,
+  QUEUE_HEADROOM,
+  recommendUsers,
+  scalingEfficiency,
+} from "../src/lib/formulas";
 import { GPUS } from "../src/lib/models";
 import { BASE_CONFIG } from "../src/lib/presets";
 
@@ -244,5 +251,144 @@ describe("topology", () => {
     expect(advice.warnings.some((w) => w.includes("Even 64 GPUs only reach"))).toBe(
       true,
     );
+  });
+});
+
+describe("recommended users", () => {
+  const replicas = {
+    ...noCache,
+    modelId: "llama8b",
+    quantId: "bf16",
+    gpuId: "l40s",
+    gpuCount: 2,
+    context: 4096,
+  };
+
+  it("matches the memory ceiling when the targets are easy", () => {
+    const rec = recommendUsers({ ...noCache, gpuCount: 4, context: 8192 });
+    expect(rec.memoryCeiling).toBeGreaterThan(150);
+    expect(rec.recommended).toBeGreaterThan(0);
+    expect(rec.recommended).toBeLessThanOrEqual(rec.memoryCeiling);
+    expect(rec.bind).toBe("memory");
+  });
+
+  it("tightens when the latency targets fall", () => {
+    const loose = recommendUsers({
+      ...noCache,
+      gpuCount: 4,
+      context: 8192,
+      targetTtft: 5000,
+      targetTpot: 100,
+    });
+    const strict = recommendUsers({
+      ...noCache,
+      gpuCount: 4,
+      context: 8192,
+      targetTtft: 800,
+      targetTpot: 30,
+    });
+    expect(strict.recommended).toBeLessThan(loose.recommended);
+  });
+
+  it("returns zero with a ttft bind when even one request misses the target", () => {
+    const rec = recommendUsers({
+      ...noCache,
+      gpuCount: 4,
+      context: 8192,
+      targetTtft: 800,
+      targetTpot: 30,
+    });
+    expect(rec.recommended).toBe(0);
+    expect(rec.bind).toBe("ttft");
+  });
+
+  it("blames decode when batching saturates the TPOT target", () => {
+    const rec = recommendUsers(replicas);
+    expect(rec.recommended).toBeGreaterThan(0);
+    expect(rec.recommended).toBeLessThan(rec.memoryCeiling);
+    expect(rec.bind).toBe("tpot");
+  });
+
+  it("stops at queueing headroom when latency is loose and think time short", () => {
+    const rec = recommendUsers({
+      ...replicas,
+      thinkTime: 5,
+      targetTpot: 200,
+      targetTtft: 5000,
+    });
+    expect(rec.bind).toBe("queue");
+    expect(rec.recommended).toBeGreaterThan(0);
+    expect(rec.recommended).toBeLessThan(rec.memoryCeiling);
+    expect(rec.utilization).toBeLessThanOrEqual(QUEUE_HEADROOM);
+  });
+
+  it("returns zero for weights that never fit the selection", () => {
+    const rec = recommendUsers({
+      ...noCache,
+      modelId: "llama70b",
+      quantId: "bf16",
+      gpuCount: 1,
+    });
+    expect(rec.recommended).toBe(0);
+    expect(rec.memoryCeiling).toBe(0);
+    expect(rec.bind).toBe("memory");
+  });
+
+  it("follows the replica-to-sharding switch instead of stopping early", () => {
+    const loose = {
+      ...replicas,
+      targetTtft: 30000,
+      targetTpot: 200,
+    };
+    const low = computeMetrics({ ...loose, users: 1 });
+    const high = computeMetrics({ ...loose, users: 200 });
+    expect(low.mode).toBe("replicas");
+    expect(high.mode).toBe("tensor-parallel");
+    expect(high.maxUsers).toBeGreaterThan(low.maxUsers);
+
+    const rec = recommendUsers(loose);
+    expect(rec.memoryCeiling).toBe(high.maxUsers);
+    expect(rec.recommended).toBe(high.maxUsers);
+    expect(rec.bind).toBe("memory");
+    expect(recommendUsers({ ...loose, users: 200 }).recommended).toBe(rec.recommended);
+  });
+
+  it("reports the simulator cap when KV capacity outlasts the users slider", () => {
+    const rec = recommendUsers({
+      ...noCache,
+      modelId: "llama8b",
+      quantId: "int4",
+      gpuId: "h200",
+      gpuCount: 16,
+      context: 1024,
+      targetTtft: 30000,
+      targetTpot: 300,
+    });
+    expect(rec.memoryCeiling).toBe(20000);
+    expect(rec.recommended).toBe(20000);
+    expect(rec.bind).toBe("load");
+    expect(rec.note).toContain("20,000");
+  });
+
+  it("raises the ceiling and safe load with caching when the layout stays sharded", () => {
+    const tp = { ...noCache, gpuCount: 4, context: 8192 };
+    const bare = recommendUsers(tp);
+    const cached = recommendUsers({
+      ...tp,
+      exactHit: 0.12,
+      semanticHit: 0.1,
+      prefixHit: 0.75,
+      prefixShare: 0.35,
+    });
+    expect(cached.memoryCeiling).toBeGreaterThanOrEqual(bare.memoryCeiling);
+    expect(cached.recommended).toBeGreaterThanOrEqual(bare.recommended);
+  });
+
+  it("never drops the count for more GPUs or slower traffic", () => {
+    const bare = recommendUsers(replicas);
+    const more = recommendUsers({ ...replicas, gpuCount: 4 });
+    const slower = recommendUsers({ ...replicas, thinkTime: 60 });
+    expect(more.recommended).toBeGreaterThanOrEqual(bare.recommended);
+    expect(slower.recommended).toBeGreaterThanOrEqual(bare.recommended);
   });
 });

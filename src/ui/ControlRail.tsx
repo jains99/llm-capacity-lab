@@ -5,6 +5,7 @@ import {
   fmtPct,
 } from "../lib/format";
 import type { Metrics } from "../lib/formulas";
+import { recommendUsers } from "../lib/formulas";
 import { GPUS, KV_QUANTS, MODELS, QUANTS, modelById } from "../lib/models";
 import { useStore } from "../state/store";
 import { Info, LogSlider, Section, Segmented, Slider, Toggle } from "./controls";
@@ -12,6 +13,7 @@ import { Info, LogSlider, Section, Segmented, Slider, Toggle } from "./controls"
 export function ControlRail({ m }: { m: Metrics }) {
   const config = useStore((s) => s.config);
   const set = useStore((s) => s.set);
+  const rec = recommendUsers(config);
   const model = m.model;
   const gpu = m.gpu;
 
@@ -175,6 +177,17 @@ export function ControlRail({ m }: { m: Metrics }) {
             </>
           }
         />
+        {rec.recommended > 0 && config.users > rec.recommended ? (
+          <button
+            className="ghost-btn"
+            style={{ width: "100%", justifyContent: "space-between" }}
+            onClick={() => set("users", rec.recommended)}
+            title={rec.note}
+          >
+            Snap users to {fmtNum(rec.recommended)}
+            <span>↓ safe load</span>
+          </button>
+        ) : null}
         <Slider
           label="Think time"
           value={config.thinkTime}

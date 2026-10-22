@@ -567,3 +567,120 @@ export function adviseTopology(c: EngineConfig): TopologyAdvice {
     maxUsersAt: final.maxUsers,
   };
 }
+
+export type RecommendBind = "memory" | "ttft" | "tpot" | "queue" | "load";
+
+export type RecommendedUsers = {
+  /** Largest users value that keeps every gate open. 0 when nothing is servable. */
+  recommended: number;
+  /** Hard VRAM ceiling for the current selection. */
+  memoryCeiling: number;
+  /** The constraint that stops the count one step higher. */
+  bind: RecommendBind;
+  utilization: number;
+  ttftAt: number;
+  tpotAt: number;
+  tokPerSecAt: number;
+  note: string;
+};
+
+/** Utilization ceiling before Erlang-C p95 waits dominate the SLO. */
+export const QUEUE_HEADROOM = 0.8;
+
+/** Matches the users bound in the store's NUMERIC table. */
+const RECOMMEND_MAX_USERS = 20_000;
+
+const BIND_NOTES: Record<RecommendBind, string> = {
+  memory: "KV capacity is the wall. FP8 KV cache, a shorter context, or more GPUs buys slots.",
+  ttft: "Prefill plus queue wait misses the TTFT target at this load. More GPUs or shorter prompts help.",
+  tpot: "Decode bandwidth misses the TPOT target at this batch size. KV quant or a faster GPU helps.",
+  queue: "Latency is fine but the fleet is past 80% utilization. Replicas are the lever.",
+  load: "The KV cache has room past the simulator's 20,000-user load limit, so no hardware gate binds here.",
+};
+
+function safeUsers(u: number, c: EngineConfig): boolean {
+  const m = computeMetrics({ ...c, users: u });
+  return (
+    m.fits &&
+    m.maxUsers >= u &&
+    m.ttftP95Ms <= c.targetTtft &&
+    m.tpotMs <= c.targetTpot &&
+    m.utilization <= QUEUE_HEADROOM
+  );
+}
+
+/** Names the first gate that fails above a candidate load, in priority order. */
+function bindBeyond(u: number, c: EngineConfig): RecommendBind {
+  const m = computeMetrics({ ...c, users: u });
+  if (!m.fits || m.maxUsers < u) return "memory";
+  if (m.ttftP95Ms > c.targetTtft) return "ttft";
+  if (m.tpotMs > c.targetTpot) return "tpot";
+  return "queue";
+}
+
+/**
+ * Finds the largest safe load in a range where the layout and KV ceiling stay
+ * fixed. safe(u) is downward-closed there, so a bisection is valid.
+ */
+function largestSafeInRange(start: number, end: number, c: EngineConfig): number | null {
+  let lo = start;
+  let hi = end;
+  let best: number | null = null;
+  while (lo <= hi) {
+    const mid = Math.floor((lo + hi) / 2);
+    if (safeUsers(mid, c)) {
+      best = mid;
+      lo = mid + 1;
+    } else {
+      hi = mid - 1;
+    }
+  }
+  return best;
+}
+
+/**
+ * Largest concurrent-user load the current selection serves without breaking
+ * the TTFT/TPOT targets or pushing the fleet past queueing headroom.
+ *
+ * Below the replica ceiling the engine uses independent replicas; above it,
+ * sharding takes over when it holds more KV. Each layout is searched
+ * separately so the recommendation can follow that switch instead of stopping
+ * at the smaller replica ceiling.
+ */
+export function recommendUsers(c: EngineConfig): RecommendedUsers {
+  const lowCeiling = computeMetrics({ ...c, users: 1 }).maxUsers;
+  const highCeiling = computeMetrics({ ...c, users: RECOMMEND_MAX_USERS }).maxUsers;
+  const realCeiling = Math.max(lowCeiling, highCeiling);
+  const memoryCeiling = Math.min(realCeiling, RECOMMEND_MAX_USERS);
+
+  const lowCap = Math.min(lowCeiling, RECOMMEND_MAX_USERS);
+  const highCap = Math.min(highCeiling, RECOMMEND_MAX_USERS);
+  let best = lowCap > 0 ? largestSafeInRange(1, lowCap, c) : null;
+  if (highCap > lowCap) {
+    const sharded = largestSafeInRange(lowCap + 1, highCap, c);
+    if (sharded !== null && (best === null || sharded > best)) best = sharded;
+  }
+  const recommended = best ?? 0;
+
+  const bind: RecommendBind =
+    recommended >= RECOMMEND_MAX_USERS && realCeiling > RECOMMEND_MAX_USERS
+      ? "load"
+      : bindBeyond(recommended + 1, c);
+  const at = computeMetrics({ ...c, users: Math.max(1, recommended) });
+
+  const note =
+    recommended === 0
+      ? "Even one user misses the targets under this selection."
+      : BIND_NOTES[bind];
+
+  return {
+    recommended,
+    memoryCeiling,
+    bind,
+    utilization: at.utilization,
+    ttftAt: at.ttftP95Ms,
+    tpotAt: at.tpotMs,
+    tokPerSecAt: at.tokPerSecUser,
+    note,
+  };
+}
